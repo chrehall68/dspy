@@ -19,7 +19,7 @@ def backoff_hdlr(details):
 
 
 _async_client: openai.AsyncOpenAI = None
-ERRORS = (openai.RateLimitError,)
+ERRORS = (openai.RateLimitError, openai.APIConnectionError)
 
 
 class AGPT3(ALM):
