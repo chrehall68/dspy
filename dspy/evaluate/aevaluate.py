@@ -60,7 +60,7 @@ class AEvaluate:
                 total=len(devset), dynamic_ncols=True, disable=not display_progress
             )
             tasks = [wrapped_program(idx, arg) for idx, arg in devset]
-            async for result in pool.map(tasks):
+            async for result in pool.as_completed(tasks):
                 example_idx, example, prediction, score = result
                 reordered_devset.append((example_idx, example, prediction, score))
                 ncorrect += score
