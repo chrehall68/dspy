@@ -217,7 +217,7 @@ def _agenerate(template: Template, **kwargs) -> Callable:
             }
 
             assert max_depth > 0
-            return agenerate(template, **new_kwargs)(
+            return await agenerate(template, **new_kwargs)(
                 completion,
                 stage=stage,
                 max_depth=max_depth - 1,

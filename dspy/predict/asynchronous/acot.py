@@ -42,7 +42,7 @@ class AChainOfThought(Module):
         # return super().forward(signature=signature, **kwargs)
 
     async def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
+        return await self.forward(*args, **kwargs)
 
     @property
     def demos(self):
