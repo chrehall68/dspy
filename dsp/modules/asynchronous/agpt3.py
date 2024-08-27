@@ -40,7 +40,9 @@ class AGPT3(ALM):
         global _async_client
         super().__init__(model)
         self.provider = "openai"
-        _async_client = openai.AsyncOpenAI()
+        _async_client = openai.AsyncOpenAI(
+            api_key=api_key, base_url=(api_base or base_url), http_client=http_client
+        )
         _async_client.api_type = api_provider
 
         self.system_prompt = system_prompt
@@ -56,14 +58,6 @@ class AGPT3(ALM):
             else "text"
         )
         self.model_type = model_type if model_type else default_model_type
-
-        if api_key:
-            _async_client.api_key = api_key
-        api_base = base_url or api_base
-        if api_base:
-            _async_client.base_url = api_base
-        if http_client:
-            _async_client.http_client = http_client
 
         self.kwargs = {
             "temperature": 0.0,
