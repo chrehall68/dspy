@@ -1,0 +1,162 @@
+import dsp
+from dsp.modules.asynchronous.alm import ALM
+from dspy.primitives.prediction import Prediction
+from dspy.signatures.signature import ensure_signature, signature_to_template
+from dspy.predict.predict import Predict
+
+
+class APredict(Predict):
+
+    async def __call__(self, **kwargs):
+        return await self.forward(**kwargs)
+
+    async def forward(self, **kwargs):
+        assert (
+            not dsp.settings.compiling
+        ), "It's no longer ever the case that .compiling is True"
+
+        # Extract the three privileged keyword arguments.
+        new_signature = ensure_signature(kwargs.pop("new_signature", None))
+        signature = ensure_signature(kwargs.pop("signature", self.signature))
+        demos = kwargs.pop("demos", self.demos)
+        config = dict(**self.config, **kwargs.pop("config", {}))
+
+        # Get the right LM to use.
+        lm = kwargs.pop("lm", self.lm) or dsp.settings.lm
+        assert lm is not None, "No LM is loaded."
+
+        # If temperature is 0.0 but its n > 1, set temperature to 0.7.
+        temperature = config.get("temperature")
+        temperature = lm.kwargs["temperature"] if temperature is None else temperature
+
+        num_generations = config.get("n")
+        if num_generations is None:
+            num_generations = lm.kwargs.get("n", lm.kwargs.get("num_generations", 1))
+
+        if (temperature is None or temperature <= 0.15) and num_generations > 1:
+            config["temperature"] = 0.7
+            # print(f"#> Setting temperature to 0.7 since n={num_generations} and prior temperature={temperature}.")
+
+        if new_signature is not None:
+            signature = new_signature
+
+        if not all(k in kwargs for k in signature.input_fields):
+            present = [k for k in signature.input_fields if k in kwargs]
+            missing = [k for k in signature.input_fields if k not in kwargs]
+            print(
+                f"WARNING: Not all input fields were provided to module. Present: {present}. Missing: {missing}."
+            )
+
+        if dsp.settings.experimental:
+            completions = await new_generate(
+                lm, signature, dsp.Example(demos=demos, **kwargs), **config
+            )
+        else:
+            completions = await old_generate(
+                demos, signature, kwargs, config, self.lm, self.stage
+            )
+
+        pred = Prediction.from_completions(completions, signature=signature)
+
+        if kwargs.pop("_trace", True) and dsp.settings.trace is not None:
+            trace = dsp.settings.trace
+            trace.append((self, {**kwargs}, pred))
+
+        return pred
+
+    def update_config(self, **kwargs):
+        self.config = {**self.config, **kwargs}
+
+    def get_config(self):
+        return self.config
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.signature})"
+
+
+async def old_generate(demos, signature, kwargs, config, lm, stage):
+    # Switch to legacy format for dsp.generate
+    x = dsp.Example(demos=demos, **kwargs)
+    template = signature_to_template(signature)
+
+    if lm is None:
+        x, C = await dsp.agenerate(template, **config)(x, stage=stage)
+    else:
+        # Note: query_only=True means the instructions and examples are not included.
+        with dsp.settings.context(lm=lm, query_only=True):
+            x, C = await dsp.agenerate(template, **config)(x, stage=stage)
+
+    # assert stage in x, "The generated (input, output) example was not stored"
+
+    completions = []
+
+    for c in C:
+        completions.append({})
+        for field in template.fields:
+            if field.output_variable not in kwargs.keys():
+                completions[-1][field.output_variable] = getattr(
+                    c, field.output_variable
+                )
+
+    return completions
+
+
+async def new_generate(lm, signature, example, max_depth=6, **kwargs):
+    assert isinstance(lm, ALM)
+    kwargs["stop"] = tuple(kwargs.get("stop", [])) or ("\n---",)
+
+    # Generate and extract the fields.
+    template = signature_to_template(signature, adapter=dsp.ExperimentalAdapter)
+    prompt = template(example)
+    completions = await lm(prompt, **kwargs)
+    completions = [template.extract(example, p) for p in completions]
+
+    assert all(
+        set(signature.input_fields).issubset(set(c.keys())) for c in completions
+    ), "Missing input keys."
+
+    # Find the completions that are most complete.
+    field_names = [field.input_variable for field in template.fields]
+    for field_idx, key in enumerate(field_names):
+        completions_ = [
+            c for c in completions if key in c.keys() and c[key] is not None
+        ]
+        completions = completions_ or completions
+        if len(completions_) == 0:
+            break
+
+    # If none of the completions is completed (i.e., none has the final field set).
+    if len(completions_) == 0:
+        # Pick the first completion that has gone farthest.
+        completion = completions[0]
+
+        for field_idx_ in range(field_idx + 1, len(field_names)):
+            if field_names[field_idx_] in completion:
+                del completion[field_names[field_idx_]]
+
+        # Recurse with greedy decoding.
+        new_kwargs = {
+            **kwargs,
+            "n": 1,
+            "temperature": 0.0,
+        }
+
+        assert max_depth > 0
+        return new_generate(
+            lm, signature, completion, max_depth=max_depth - 1, **new_kwargs
+        )
+
+    # Keep only output fields.
+    completions = [
+        {k: v for k, v in c.items() if k in signature.output_fields}
+        for c in completions
+    ]
+
+    return completions
+
+
+# TODO: get some defaults during init from the context window?
+# # TODO: FIXME: Hmm, I guess expected behavior is that contexts can
+# affect execution. Well, we need to determine whether context dominates, __init__ demoninates, or forward dominates.
+# Generally, unless overwritten, we'd see n=None, temperature=None.
+# That will eventually mean we have to learn them.

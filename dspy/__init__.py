@@ -1,6 +1,6 @@
 import dsp
 from dsp.modules.hf_client import ChatModuleClient, HFClientSGLang, HFClientVLLM, HFServerTGI
-
+import dsp.modules.asynchronous.agpt3
 from .predict import *
 from .primitives import *
 from .retrieve import *
@@ -16,6 +16,7 @@ LM = dsp.LM
 
 AzureOpenAI = dsp.AzureOpenAI
 OpenAI = dsp.GPT3
+AOpenAI = dsp.modules.asynchronous.agpt3.AGPT3
 MultiOpenAI = dsp.MultiOpenAI
 Mistral = dsp.Mistral
 Databricks = dsp.Databricks
