@@ -17,6 +17,9 @@ except ImportError:
 import dspy
 from dspy.predict.parameter import Parameter
 from dspy.teleprompt.bootstrap import BootstrapFewShot, LabeledFewShot
+from dspy.teleprompt.asynchronous.bootstrap import (
+    BootstrapFewShot as AsyncBootstrapFewShot,
+)
 
 """
 This file consists of helper functions for our variety of optimizers.
@@ -56,8 +59,30 @@ def eval_candidate_program(batch_size, trainset, candidate_program, evaluate):
     return score
 
 
+async def aeval_candidate_program(batch_size, trainset, candidate_program, evaluate):
+    """Evaluate a candidate program on the trainset, using the specified batch size."""
+    # Evaluate on the full trainset
+    if batch_size >= len(trainset):
+        score = await evaluate(candidate_program, devset=trainset, display_table=0)
+    # Or evaluate on a minibatch
+    else:
+        score = await evaluate(
+            candidate_program,
+            devset=create_minibatch(trainset, batch_size),
+            display_table=0,
+        )
+
+    return score
+
+
 def eval_candidate_program_with_pruning(
-    trial, trial_logs, trainset, candidate_program, evaluate, trial_num, batch_size=100,
+    trial,
+    trial_logs,
+    trainset,
+    candidate_program,
+    evaluate,
+    trial_num,
+    batch_size=100,
 ):
     """Evaluation of candidate_program with pruning implemented"""
 
@@ -71,7 +96,9 @@ def eval_candidate_program_with_pruning(
         end_index = min((i + 1) * batch_size, len(trainset))
         split_trainset = trainset[start_index:end_index]
         split_score = evaluate(
-            candidate_program, devset=split_trainset, display_table=0,
+            candidate_program,
+            devset=split_trainset,
+            display_table=0,
         )
         print(f"{i}st split score: {split_score}")
         total_eval_size += len(split_trainset)
@@ -129,7 +156,12 @@ def get_program_with_highest_avg_score(param_score_dict, fully_evaled_param_comb
 
 
 def calculate_last_n_proposed_quality(
-    base_program, trial_logs, evaluate, trainset, devset, n,
+    base_program,
+    trial_logs,
+    evaluate,
+    trainset,
+    devset,
+    n,
 ):
     """
     Calculate the average and best quality of the last n programs proposed. This is useful for seeing if our proposals
@@ -169,10 +201,25 @@ def calculate_last_n_proposed_quality(
 
 
 def get_task_model_history_for_full_example(
-    candidate_program, task_model, devset, evaluate,
+    candidate_program,
+    task_model,
+    devset,
+    evaluate,
 ):
     """Get a full trace of the task model's history for a given candidate program."""
     _ = evaluate(candidate_program, devset=devset[:1])
+    _ = task_model.inspect_history(n=len(candidate_program.predictors()))
+    return task_model.inspect_history(n=len(candidate_program.predictors()))
+
+
+async def aget_task_model_history_for_full_example(
+    candidate_program,
+    task_model,
+    devset,
+    evaluate,
+):
+    """Get a full trace of the task model's history for a given candidate program."""
+    _ = await evaluate(candidate_program, devset=devset[:1])
     _ = task_model.inspect_history(n=len(candidate_program.predictors()))
     return task_model.inspect_history(n=len(candidate_program.predictors()))
 
@@ -246,6 +293,7 @@ def setup_logging(log_dir):
 
 ### OTHER UTILS ###
 
+
 def get_signature(predictor):
     if hasattr(predictor, "extended_signature"):
         return predictor.extended_signature
@@ -289,7 +337,7 @@ def create_n_fewshot_demo_sets(
     # Initialize demo_candidates dictionary
     for i, _ in enumerate(student.predictors()):
         demo_candidates[i] = []
-    
+
     starter_seed = seed
     # Shuffle the trainset with the starter seed
     random.Random(starter_seed).shuffle(trainset)
@@ -303,15 +351,13 @@ def create_n_fewshot_demo_sets(
             # zero-shot
             program2 = student.reset_copy()
 
-        elif (
-            seed == -2
-            and max_labeled_demos > 0
-            and include_non_bootstrapped
-        ):
+        elif seed == -2 and max_labeled_demos > 0 and include_non_bootstrapped:
             # labels only
             teleprompter = LabeledFewShot(k=max_labeled_demos)
             program2 = teleprompter.compile(
-                student, trainset=trainset2, sample=labeled_sample,
+                student,
+                trainset=trainset2,
+                sample=labeled_sample,
             )
 
         elif seed == -1:
@@ -340,7 +386,9 @@ def create_n_fewshot_demo_sets(
             )
 
             program2 = teleprompter.compile(
-                student, teacher=teacher, trainset=trainset2,
+                student,
+                teacher=teacher,
+                trainset=trainset2,
             )
 
         for i, _ in enumerate(student.predictors()):
@@ -348,20 +396,109 @@ def create_n_fewshot_demo_sets(
 
     return demo_candidates
 
+
+def acreate_n_fewshot_demo_sets(
+    student,
+    num_candidate_sets,
+    trainset,
+    max_labeled_demos,
+    max_bootstrapped_demos,
+    metric,
+    teacher_settings,
+    max_rounds=1,
+    labeled_sample=True,
+    min_num_samples=1,
+    metric_threshold=None,
+    teacher=None,
+    include_non_bootstrapped=True,
+    seed=0,
+):
+    """
+    This function is copied from random_search.py, and creates fewshot examples in the same way that random search does.
+    This allows us to take advantage of using the same fewshot examples when we use the same random seed in our optimizers.
+    """
+    demo_candidates = {}
+
+    # Account for confusing way this is set up, where we add in 3 more candidate sets to the N specified
+    num_candidate_sets -= 3
+
+    # Initialize demo_candidates dictionary
+    for i, _ in enumerate(student.predictors()):
+        demo_candidates[i] = []
+
+    starter_seed = seed
+    # Shuffle the trainset with the starter seed
+    random.Random(starter_seed).shuffle(trainset)
+
+    # Go through and create each candidate set
+    for seed in range(-3, num_candidate_sets):
+
+        trainset2 = list(trainset)
+
+        if seed == -3 and include_non_bootstrapped:
+            # zero-shot
+            program2 = student.reset_copy()
+
+        elif seed == -2 and max_labeled_demos > 0 and include_non_bootstrapped:
+            # labels only
+            teleprompter = LabeledFewShot(k=max_labeled_demos)
+            program2 = teleprompter.compile(
+                student,
+                trainset=trainset2,
+                sample=labeled_sample,
+            )
+
+        elif seed == -1:
+            # unshuffled few-shot
+            program = AsyncBootstrapFewShot(
+                metric=metric,
+                max_bootstrapped_demos=max_bootstrapped_demos,
+                max_labeled_demos=max_labeled_demos,
+                teacher_settings=teacher_settings,
+                max_rounds=max_rounds,
+            )
+            program2 = program.compile(student, teacher=teacher, trainset=trainset2)
+
+        else:
+            # shuffled few-shot
+            random.Random(seed).shuffle(trainset2)
+            size = random.Random(seed).randint(min_num_samples, max_bootstrapped_demos)
+
+            teleprompter = AsyncBootstrapFewShot(
+                metric=metric,
+                metric_threshold=metric_threshold,
+                max_bootstrapped_demos=size,
+                max_labeled_demos=max_labeled_demos,
+                teacher_settings=teacher_settings,
+                max_rounds=max_rounds,
+            )
+
+            program2 = teleprompter.compile(
+                student,
+                teacher=teacher,
+                trainset=trainset2,
+            )
+
+        for i, _ in enumerate(student.predictors()):
+            demo_candidates[i].append(program2.predictors()[i].demos)
+
+    return demo_candidates
+
+
 def old_getfile(object):
     """Work out which source or compiled file an object was defined in."""
     if inspect.ismodule(object):
-        if getattr(object, '__file__', None):
+        if getattr(object, "__file__", None):
             return object.__file__
-        raise TypeError('{!r} is a built-in module'.format(object))
+        raise TypeError("{!r} is a built-in module".format(object))
     if inspect.isclass(object):
-        if hasattr(object, '__module__'):
+        if hasattr(object, "__module__"):
             module = sys.modules.get(object.__module__)
-            if getattr(module, '__file__', None):
+            if getattr(module, "__file__", None):
                 return module.__file__
-            if object.__module__ == '__main__':
-                raise OSError('source code not available')
-        raise TypeError('{!r} is a built-in class'.format(object))
+            if object.__module__ == "__main__":
+                raise OSError("source code not available")
+        raise TypeError("{!r} is a built-in class".format(object))
     if inspect.ismethod(object):
         object = object.__func__
     if inspect.isfunction(object):
@@ -372,34 +509,44 @@ def old_getfile(object):
         object = object.f_code
     if inspect.iscode(object):
         return object.co_filename
-    raise TypeError('module, class, method, function, traceback, frame, or '
-                    'code object was expected, got {}'.format(
-                    type(object).__name__))
+    raise TypeError(
+        "module, class, method, function, traceback, frame, or "
+        "code object was expected, got {}".format(type(object).__name__)
+    )
+
 
 def new_getfile(object):
     if not inspect.isclass(object):
         return old_getfile(object)
-    
+
     # Lookup by parent module (as in current inspect)
-    if hasattr(object, '__module__'):
+    if hasattr(object, "__module__"):
         object_ = sys.modules.get(object.__module__)
-        if hasattr(object_, '__file__'):
+        if hasattr(object_, "__file__"):
             return object_.__file__
-    
+
     # If parent module is __main__, lookup by methods (NEW)
     for name, member in inspect.getmembers(object):
-        if inspect.isfunction(member) and object.__qualname__ + '.' + member.__name__ == member.__qualname__:
+        if (
+            inspect.isfunction(member)
+            and object.__qualname__ + "." + member.__name__ == member.__qualname__
+        ):
             return inspect.getfile(member)
-    raise TypeError(f'Source for {object!r} not found')
+    raise TypeError(f"Source for {object!r} not found")
+
 
 inspect.getfile = new_getfile
+
 
 def get_dspy_source_code(module):
     header = []
     base_code = ""
 
     # Don't get source code for Predict or ChainOfThought modules (NOTE we will need to extend this list as more DSPy.modules are added)
-    if not type(module).__name__ == "Predict" and not type(module).__name__ == "ChainOfThought":
+    if (
+        not type(module).__name__ == "Predict"
+        and not type(module).__name__ == "ChainOfThought"
+    ):
         try:
             base_code = inspect.getsource(type(module))
         except TypeError:
@@ -419,18 +566,27 @@ def get_dspy_source_code(module):
             if item in completed_set:
                 continue
             if isinstance(item, Parameter):
-                if hasattr(item, 'signature') and item.signature is not None and item.signature.__pydantic_parent_namespace__['signature_name'] + "_sig" not in completed_set:
+                if (
+                    hasattr(item, "signature")
+                    and item.signature is not None
+                    and item.signature.__pydantic_parent_namespace__["signature_name"]
+                    + "_sig"
+                    not in completed_set
+                ):
                     try:
                         header.append(inspect.getsource(item.signature))
                         print(inspect.getsource(item.signature))
                     except (TypeError, OSError):
                         header.append(str(item.signature))
-                    completed_set.add(item.signature.__pydantic_parent_namespace__['signature_name'] + "_sig")
+                    completed_set.add(
+                        item.signature.__pydantic_parent_namespace__["signature_name"]
+                        + "_sig"
+                    )
             if isinstance(item, dspy.Module):
                 code = get_dspy_source_code(item).strip()
                 if code not in completed_set:
                     header.append(code)
                     completed_set.add(code)
             completed_set.add(item)
-        
-    return '\n\n'.join(header) + '\n\n' + base_code
+
+    return "\n\n".join(header) + "\n\n" + base_code
